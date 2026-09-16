@@ -9,7 +9,7 @@ import {
   Draggable,
   DropResult
 } from '@hello-pangea/dnd'
-import { Plus, Trash2, CheckCircle2, Clock, ListTodo, Pencil, Check, X } from 'lucide-react'
+import { Plus, Trash2, CheckCircle2, Clock, ListTodo, Pencil, Check, X, AlertTriangle } from 'lucide-react'
 
 interface Tarea {
   id: string
@@ -36,7 +36,14 @@ export default function Home() {
   const [nuevaPrioridad, setNuevaPrioridad] = useState<'baja' | 'media' | 'alta'>('media')
   const [editandoId, setEditandoId] = useState<string | null>(null)
   const [edicion, setEdicion] = useState({ titulo: '', descripcion: '', prioridad: 'media' as Tarea['prioridad'] })
+  const [errorMsg, setErrorMsg] = useState<string | null>(null)
   const router = useRouter()
+
+  // Muestra un aviso de error en pantalla durante unos segundos y luego lo borra solo
+  const mostrarError = (mensaje: string) => {
+    setErrorMsg(mensaje)
+    setTimeout(() => setErrorMsg(null), 4000)
+  }
 
   // Comprueba si hay sesión activa antes de dejar ver el tablero
   useEffect(() => {
@@ -102,6 +109,7 @@ export default function Home() {
     const { data, error } = await supabase.from('tareas').select('*')
     if (error) {
       console.error('Error al cargar tareas:', error)
+      mostrarError('No se pudieron cargar las tareas. Revisa tu conexión.')
     } else if (data) {
       setTareas(data as Tarea[])
     }
@@ -132,6 +140,7 @@ export default function Home() {
 
     if (error) {
       console.error('Error al actualizar tarea:', error)
+      mostrarError('No se pudo mover la tarea. Se ha revertido el cambio.')
       fetchTareas() // Revertir en caso de error
     }
   }
@@ -156,6 +165,7 @@ export default function Home() {
     const { error } = await supabase.from('tareas').insert([nuevaTarea])
     if (error) {
       console.error('Error al crear tarea:', error)
+      mostrarError('No se pudo crear la tarea. Inténtalo de nuevo.')
       fetchTareas()
     }
   }
@@ -165,6 +175,7 @@ export default function Home() {
     const { error } = await supabase.from('tareas').delete().eq('id', id)
     if (error) {
       console.error('Error al eliminar tarea:', error)
+      mostrarError('No se pudo borrar la tarea.')
       fetchTareas()
     }
   }
@@ -192,6 +203,7 @@ export default function Home() {
 
     if (error) {
       console.error('Error al editar tarea:', error)
+      mostrarError('No se pudieron guardar los cambios.')
       fetchTareas()
     }
   }
@@ -222,6 +234,17 @@ export default function Home() {
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 font-sans p-6 sm:p-10">
+      {/* AVISO DE ERROR */}
+      {errorMsg && (
+        <div className="fixed top-4 right-4 z-50 bg-rose-950 border border-rose-500/40 text-rose-200 text-sm px-4 py-3 rounded-xl shadow-2xl flex items-center gap-2 max-w-sm">
+          <AlertTriangle className="w-4 h-4 flex-shrink-0" />
+          <span>{errorMsg}</span>
+          <button onClick={() => setErrorMsg(null)} className="ml-2 text-rose-400 hover:text-rose-200">
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
       <header className="max-w-7xl mx-auto mb-10 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-b border-slate-800 pb-6">
         <div>
           <h1 className="text-3xl font-extrabold tracking-tight bg-gradient-to-r from-blue-400 via-indigo-400 to-purple-400 bg-clip-text text-transparent">
