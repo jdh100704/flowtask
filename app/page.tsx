@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import {
   DragDropContext,
@@ -8,7 +9,7 @@ import {
   Draggable,
   DropResult
 } from '@hello-pangea/dnd'
-import { Plus, Trash2, CheckCircle2, Clock, ListTodo } from 'lucide-react'
+import { Plus, Trash2, CheckCircle2, Clock, ListTodo, Pencil, Check, X } from 'lucide-react'
 
 interface Tarea {
   id: string
@@ -16,6 +17,7 @@ interface Tarea {
   descripcion: string
   estado: 'todo' | 'in_progress' | 'done'
   prioridad: 'baja' | 'media' | 'alta'
+  user_id?: string
 }
 
 const COLUMNAS = [
@@ -27,15 +29,76 @@ const COLUMNAS = [
 export default function Home() {
   const [tareas, setTareas] = useState<Tarea[]>([])
   const [cargando, setCargando] = useState(true)
+  const [sesionLista, setSesionLista] = useState(false)
+  const [userId, setUserId] = useState<string | null>(null)
   const [nuevoTitulo, setNuevoTitulo] = useState('')
   const [nuevaDesc, setNuevaDesc] = useState('')
   const [nuevaPrioridad, setNuevaPrioridad] = useState<'baja' | 'media' | 'alta'>('media')
+  const [editandoId, setEditandoId] = useState<string | null>(null)
+  const [edicion, setEdicion] = useState({ titulo: '', descripcion: '', prioridad: 'media' as Tarea['prioridad'] })
+  const router = useRouter()
+
+  // Comprueba si hay sesión activa antes de dejar ver el tablero
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (!session) {
+        router.push('/login')
+      } else {
+        setUserId(session.user.id) // Guardamos el ID del usuario logueado
+        setSesionLista(true)
+      }
+    })
+
+    // Escucha también si el usuario cierra sesión mientras está en la página
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (!session) router.push('/login')
+    })
+
+    return () => listener.subscription.unsubscribe()
+  }, [])
 
   useEffect(() => {
     fetchTareas()
+
+    // Abrimos un canal llamado "tareas-realtime" (el nombre es libre, es solo una etiqueta)
+    const channel = supabase
+      .channel('tareas-realtime')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'tareas' },
+        (payload) => {
+          if (payload.eventType === 'INSERT') {
+            const nueva = payload.new as Tarea
+            setTareas((prev) =>
+              // Evita duplicar si ya la habíamos añadido nosotros mismos de forma optimista
+              prev.some((t) => t.id === nueva.id) ? prev : [...prev, nueva]
+            )
+          }
+
+          if (payload.eventType === 'UPDATE') {
+            const actualizada = payload.new as Tarea
+            setTareas((prev) =>
+              prev.map((t) => (t.id === actualizada.id ? actualizada : t))
+            )
+          }
+
+          if (payload.eventType === 'DELETE') {
+            const borrada = payload.old as Tarea
+            setTareas((prev) => prev.filter((t) => t.id !== borrada.id))
+          }
+        }
+      )
+      .subscribe()
+
+    // Cuando el componente se desmonta (cierras la pestaña, navegas a otra página),
+    // cerramos el canal para no dejar conexiones abiertas innecesariamente
+    return () => {
+      supabase.removeChannel(channel)
+    }
   }, [])
 
   async function fetchTareas() {
+    // Con RLS activado, Supabase ya solo devuelve las tareas del usuario logueado
     const { data, error } = await supabase.from('tareas').select('*')
     if (error) {
       console.error('Error al cargar tareas:', error)
@@ -75,14 +138,15 @@ export default function Home() {
 
   const crearTarea = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!nuevoTitulo.trim()) return
+    if (!nuevoTitulo.trim() || !userId) return
 
     const nuevaTarea: Tarea = {
-      id: Date.now().toString(),
+      id: crypto.randomUUID(),
       titulo: nuevoTitulo,
       descripcion: nuevaDesc,
       estado: 'todo',
-      prioridad: nuevaPrioridad
+      prioridad: nuevaPrioridad,
+      user_id: userId // Necesario para que la política RLS de "insert" lo permita
     }
 
     setTareas((prev) => [...prev, nuevaTarea])
@@ -105,6 +169,38 @@ export default function Home() {
     }
   }
 
+  const iniciarEdicion = (tarea: Tarea) => {
+    setEditandoId(tarea.id)
+    setEdicion({ titulo: tarea.titulo, descripcion: tarea.descripcion, prioridad: tarea.prioridad })
+  }
+
+  const cancelarEdicion = () => {
+    setEditandoId(null)
+  }
+
+  const guardarEdicion = async (id: string) => {
+    // Actualización optimista, igual que en handleDragEnd
+    setTareas((prev) =>
+      prev.map((t) => (t.id === id ? { ...t, ...edicion } : t))
+    )
+    setEditandoId(null)
+
+    const { error } = await supabase
+      .from('tareas')
+      .update(edicion)
+      .eq('id', id)
+
+    if (error) {
+      console.error('Error al editar tarea:', error)
+      fetchTareas()
+    }
+  }
+
+  const cerrarSesion = async () => {
+    await supabase.auth.signOut()
+    router.push('/login')
+  }
+
   const getPrioridadBadge = (p: Tarea['prioridad']) => {
     switch (p) {
       case 'alta':
@@ -116,7 +212,7 @@ export default function Home() {
     }
   }
 
-  if (cargando) {
+  if (cargando || !sesionLista) {
     return (
       <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center">
         <p className="text-slate-400 animate-pulse font-mono">Cargando tablero...</p>
@@ -135,6 +231,12 @@ export default function Home() {
             Gestión visual de proyectos en tiempo real
           </p>
         </div>
+        <button
+          onClick={cerrarSesion}
+          className="text-xs text-slate-400 hover:text-rose-400 transition border border-slate-800 rounded-lg px-3 py-1.5"
+        >
+          Cerrar sesión
+        </button>
       </header>
 
       {/* FORMULARIO DE CREACIÓN */}
@@ -223,31 +325,84 @@ export default function Home() {
                                     : ''
                                 }`}
                               >
-                                <div className="flex items-start justify-between gap-2 mb-2">
-                                  <h3 className="font-medium text-sm text-slate-100">
-                                    {tarea.titulo}
-                                  </h3>
-                                  <button
-                                    onClick={() => eliminarTarea(tarea.id)}
-                                    className="text-slate-600 hover:text-rose-400 transition cursor-pointer p-1"
-                                  >
-                                    <Trash2 className="w-3.5 h-3.5" />
-                                  </button>
-                                </div>
-                                {tarea.descripcion && (
-                                  <p className="text-slate-400 text-xs mb-3 font-light leading-relaxed">
-                                    {tarea.descripcion}
-                                  </p>
+                                {editandoId === tarea.id ? (
+                                  // MODO EDICIÓN
+                                  <div className="space-y-2">
+                                    <input
+                                      type="text"
+                                      value={edicion.titulo}
+                                      onChange={(e) => setEdicion({ ...edicion, titulo: e.target.value })}
+                                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-sm text-slate-100 focus:outline-none focus:border-indigo-500"
+                                    />
+                                    <input
+                                      type="text"
+                                      value={edicion.descripcion}
+                                      onChange={(e) => setEdicion({ ...edicion, descripcion: e.target.value })}
+                                      placeholder="Descripción (opcional)..."
+                                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
+                                    />
+                                    <select
+                                      value={edicion.prioridad}
+                                      onChange={(e) => setEdicion({ ...edicion, prioridad: e.target.value as Tarea['prioridad'] })}
+                                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-xs text-slate-300 focus:outline-none focus:border-indigo-500"
+                                    >
+                                      <option value="baja">Prioridad Baja</option>
+                                      <option value="media">Prioridad Media</option>
+                                      <option value="alta">Prioridad Alta</option>
+                                    </select>
+                                    <div className="flex justify-end gap-2 pt-1">
+                                      <button
+                                        onClick={cancelarEdicion}
+                                        className="text-slate-500 hover:text-slate-300 transition p-1"
+                                      >
+                                        <X className="w-4 h-4" />
+                                      </button>
+                                      <button
+                                        onClick={() => guardarEdicion(tarea.id)}
+                                        className="text-emerald-500 hover:text-emerald-400 transition p-1"
+                                      >
+                                        <Check className="w-4 h-4" />
+                                      </button>
+                                    </div>
+                                  </div>
+                                ) : (
+                                  // MODO NORMAL
+                                  <>
+                                    <div className="flex items-start justify-between gap-2 mb-2">
+                                      <h3 className="font-medium text-sm text-slate-100">
+                                        {tarea.titulo}
+                                      </h3>
+                                      <div className="flex items-center gap-1">
+                                        <button
+                                          onClick={() => iniciarEdicion(tarea)}
+                                          className="text-slate-600 hover:text-indigo-400 transition cursor-pointer p-1"
+                                        >
+                                          <Pencil className="w-3.5 h-3.5" />
+                                        </button>
+                                        <button
+                                          onClick={() => eliminarTarea(tarea.id)}
+                                          className="text-slate-600 hover:text-rose-400 transition cursor-pointer p-1"
+                                        >
+                                          <Trash2 className="w-3.5 h-3.5" />
+                                        </button>
+                                      </div>
+                                    </div>
+                                    {tarea.descripcion && (
+                                      <p className="text-slate-400 text-xs mb-3 font-light leading-relaxed">
+                                        {tarea.descripcion}
+                                      </p>
+                                    )}
+                                    <div className="flex items-center justify-between pt-2 border-t border-slate-800/60">
+                                      <span
+                                        className={`text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-md border ${getPrioridadBadge(
+                                          tarea.prioridad
+                                        )}`}
+                                      >
+                                        {tarea.prioridad}
+                                      </span>
+                                    </div>
+                                  </>
                                 )}
-                                <div className="flex items-center justify-between pt-2 border-t border-slate-800/60">
-                                  <span
-                                    className={`text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-md border ${getPrioridadBadge(
-                                      tarea.prioridad
-                                    )}`}
-                                  >
-                                    {tarea.prioridad}
-                                  </span>
-                                </div>
                               </div>
                             )}
                           </Draggable>
